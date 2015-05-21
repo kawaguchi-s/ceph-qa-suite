@@ -192,14 +192,14 @@ class Thrasher:
                     remotes.iterkeys()
             if ('keyvaluestore_backend' in
                     self.ceph_manager.ctx.ceph.conf['osd']):
-                prefix = ("sudo ceph-objectstore-tool "
+                prefix = ("sudo adjust-ulimits ceph-objectstore-tool "
                           "--data-path {fpath} --journal-path {jpath} "
                           "--type keyvaluestore "
                           "--log-file="
                           "/var/log/ceph/objectstore_tool.\\$pid.log ".
                           format(fpath=FSPATH, jpath=JPATH))
             else:
-                prefix = ("sudo ceph-objectstore-tool "
+                prefix = ("sudo adjust-ulimits ceph-objectstore-tool "
                           "--data-path {fpath} --journal-path {jpath} "
                           "--log-file="
                           "/var/log/ceph/objectstore_tool.\\$pid.log ".
@@ -267,7 +267,10 @@ class Thrasher:
             proc = imp_remote.run(args=cmd, wait=True, check_status=False)
             if proc.exitstatus == 10:
                 self.log("Pool went away before processing an import"
-                         "...ignored");
+                         "...ignored")
+            elif proc.exitstatus == 11:
+                self.log("Attempt to import an incompatible export"
+                         "...ignored")
             elif proc.exitstatus:
                 raise Exception("ceph-objectstore-tool: "
                                 "import failure with status {ret}".
@@ -291,14 +294,14 @@ class Thrasher:
             JPATH = os.path.join(FSPATH, "journal")
             if ('keyvaluestore_backend' in
                     self.ceph_manager.ctx.ceph.conf['osd']):
-                prefix = ("sudo ceph-objectstore-tool "
+                prefix = ("sudo adjust-ulimits ceph-objectstore-tool "
                           "--data-path {fpath} --journal-path {jpath} "
                           "--type keyvaluestore "
                           "--log-file="
                           "/var/log/ceph/objectstore_tool.\\$pid.log ".
                           format(fpath=FSPATH, jpath=JPATH))
             else:
-                prefix = ("sudo ceph-objectstore-tool "
+                prefix = ("sudo adjust-ulimits ceph-objectstore-tool "
                           "--data-path {fpath} --journal-path {jpath} "
                           "--log-file="
                           "/var/log/ceph/objectstore_tool.\\$pid.log ".
@@ -699,7 +702,7 @@ class ObjectStoreTool:
     def build_cmd(self, options, args, stdin):
         lines = []
         if self.object_name:
-            lines.append("object=$(sudo ceph-objectstore-tool "
+            lines.append("object=$(sudo adjust-ulimits ceph-objectstore-tool "
                          "{paths} --pgid {pgid} --op list |"
                          "grep '\"oid\":\"{name}\"')".
                          format(paths=self.paths,
@@ -707,7 +710,7 @@ class ObjectStoreTool:
                                 name=self.object_name))
             args = '"$object" ' + args
             options += " --pgid {pgid}".format(pgid=self.pgid)
-        cmd = ("sudo ceph-objectstore-tool {paths} {options} {args}".
+        cmd = ("sudo adjust-ulimits ceph-objectstore-tool {paths} {options} {args}".
                format(paths=self.paths,
                       args=args,
                       options=options))
@@ -1121,7 +1124,7 @@ class CephManager:
                                           erasure coded pool using the profile
         """
         with self.lock:
-            assert isinstance(pool_name, str)
+            assert isinstance(pool_name, basestring)
             assert isinstance(pg_num, int)
             assert pool_name not in self.pools
             self.log("creating pool_name %s" % (pool_name,))
@@ -1140,7 +1143,7 @@ class CephManager:
         :param pool_name: Pool to be removed
         """
         with self.lock:
-            assert isinstance(pool_name, str)
+            assert isinstance(pool_name, basestring)
             assert pool_name in self.pools
             self.log("removing pool_name %s" % (pool_name,))
             del self.pools[pool_name]
@@ -1160,7 +1163,7 @@ class CephManager:
         Return the number of pgs in the pool specified.
         """
         with self.lock:
-            assert isinstance(pool_name, str)
+            assert isinstance(pool_name, basestring)
             if pool_name in self.pools:
                 return self.pools[pool_name]
             return 0
@@ -1172,8 +1175,8 @@ class CephManager:
         :returns: property as an int value.
         """
         with self.lock:
-            assert isinstance(pool_name, str)
-            assert isinstance(prop, str)
+            assert isinstance(pool_name, basestring)
+            assert isinstance(prop, basestring)
             output = self.raw_cluster_cmd(
                 'osd',
                 'pool',
@@ -1191,8 +1194,8 @@ class CephManager:
         This routine retries if set operation fails.
         """
         with self.lock:
-            assert isinstance(pool_name, str)
-            assert isinstance(prop, str)
+            assert isinstance(pool_name, basestring)
+            assert isinstance(prop, basestring)
             assert isinstance(val, int)
             tries = 0
             while True:
@@ -1219,7 +1222,7 @@ class CephManager:
         Increase the number of pgs in a pool
         """
         with self.lock:
-            assert isinstance(pool_name, str)
+            assert isinstance(pool_name, basestring)
             assert isinstance(by, int)
             assert pool_name in self.pools
             if self.get_num_creating() > 0:
@@ -1236,7 +1239,7 @@ class CephManager:
         Set pgpnum property of pool_name pool.
         """
         with self.lock:
-            assert isinstance(pool_name, str)
+            assert isinstance(pool_name, basestring)
             assert pool_name in self.pools
             if self.get_num_creating() > 0:
                 return
@@ -1879,8 +1882,7 @@ class CephManager:
         Run cluster commands for the mds in order to get mds information
         check rank.
         """
-        out = self.raw_cluster_cmd('mds', 'dump', '--format=json')
-        j = json.loads(' '.join(out.splitlines()[1:]))
+        j = self.get_mds_status_all()
         # collate; for dup ids, larger gid wins.
         for info in j['info'].itervalues():
             if info['rank'] == rank:
@@ -1900,3 +1902,24 @@ class CephManager:
         Return path to osd data with {id} needing to be replaced
         """
         return "/var/lib/ceph/osd/ceph-{id}"
+
+def utility_task(name):
+    """
+    Generate ceph_manager subtask corresponding to ceph_manager
+    method name
+    """
+    def task(ctx, config):
+        if config is None:
+            config = {}
+        args = config.get('args', [])
+        kwargs = config.get('kwargs', {})
+        fn = getattr(ctx.manager, name)
+        fn(*args, **kwargs)
+    return task
+
+revive_osd = utility_task("revive_osd")
+kill_osd = utility_task("kill_osd")
+create_pool = utility_task("create_pool")
+remove_pool = utility_task("remove_pool")
+wait_for_clean = utility_task("wait_for_clean")
+set_pool_property = utility_task("set_pool_property")
